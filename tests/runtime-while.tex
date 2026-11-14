@@ -1,0 +1,27 @@
+\input ../runtime/tex82.tex
+\def\TP@fn@a#1{%
+ \TP@enter
+ \global\TP@result=0\relax\global\TP@tag=1\relax
+ \TP@store{1}{\TP@result}
+ \def\TP@loop@bb{%
+   \global\TP@result=\TP@load{1}\relax
+   \ifnum\TP@result<5\relax\global\TP@result=1\relax
+   \else\global\TP@result=0\relax\fi
+   \global\TP@tag=2\relax
+   \TP@settruth
+   \ifnum\TP@truthvalue=0\relax\let\TP@jump\relax\else
+     \global\TP@result=\TP@load{1}\relax
+     \global\advance\TP@result by1\relax
+     \global\TP@tag=1\relax
+     \TP@store{1}{\TP@result}
+     \let\TP@jump\TP@loop@bb
+   \fi
+   \TP@jump
+ }
+ \TP@loop@bb
+ \global\TP@result=\TP@load{1}\relax\global\TP@tag=1\relax
+ \TP@println
+ \TP@leave
+}
+\TP@fn@a{0}
+\end

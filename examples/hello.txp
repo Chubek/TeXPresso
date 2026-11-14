@@ -1,0 +1,7 @@
+(module (demo hello)
+  (import (tp base) (tp io))
+  (export main)
+  (define (square x) (* x x))
+  (define (main)
+    (println "Hello from TeXPresso!")
+    (println (square 12))))

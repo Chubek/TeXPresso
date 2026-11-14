@@ -1,0 +1,169 @@
+# TeXPresso module collector/resolver. Written in MuLL.
+val Lex <- G:LoadLib("texpresso_lexer") or G:DieWith("TeXPresso: lexer load failed: $E?");
+val Read <- G:LoadLib("texpresso_reader") or G:DieWith("TeXPresso: reader load failed: $E?");
+val Need <- fn(ok, message) { if not ok { G:DieWith("TeXPresso: " + message); } return nil; };
+val IsName <- fn(n, s) { return n:tag == "sym" and n:value == s; };
+val Head <- fn(node, s) {
+  return node:tag == "list" and G:Len(node:items) > 0 and IsName(node:items[0], s);
+};
+val Name <- fn(n) {
+  if n:tag == "sym" { return n:value; }
+  Need(n:tag == "list", "module name must be symbol or symbol list");
+  var out <- ""; var i <- 0;
+  while i < G:Len(n:items) {
+    Need(n:items[i]:tag == "sym", "module name components must be symbols");
+    if i > 0 { out <- out + "."; }
+    out <- out + n:items[i]:value; i <- i + 1;
+  }
+  Need(G:Len(out) > 0, "empty module name");
+  return out;
+};
+val ParseModule <- fn(file, source) {
+  val roots <- Read:ReadAll(Lex:Lex(source));
+  Need(G:Len(roots) > 0, "empty source: " + file);
+  var moduleName <- "main"; var forms <- roots;
+  if G:Len(roots) == 1 and Head(roots[0], "module") {
+    val parts <- roots[0]:items;
+    Need(G:Len(parts) >= 2, "module form missing name");
+    moduleName <- Name(parts[1]);
+    forms <- []; var i <- 2;
+    while i < G:Len(parts) { forms <- forms + [parts[i]]; i <- i + 1; }
+  }
+  var imports <- []; var exports <- []; var declarations <- [];
+  var j <- 0;
+  while j < G:Len(forms) {
+    val form <- forms[j];
+    if Head(form, "import") {
+      var k <- 1;
+      while k < G:Len(form:items) { imports <- imports + [Name(form:items[k])]; k <- k + 1; }
+    } else if Head(form, "export") {
+      var k <- 1;
+      while k < G:Len(form:items) {
+        Need(form:items[k]:tag == "sym", "export requires a symbol");
+        exports <- exports + [form:items[k]:value]; k <- k + 1;
+      }
+    } else {
+      declarations <- declarations + [form];
+    }
+    j <- j + 1;
+  }
+  return {name: moduleName, path: file, imports: imports, exports: exports, forms: declarations};
+};
+val Has <- fn(xs, x) {
+  var i <- 0; while i < G:Len(xs) { if xs[i] == x { return true; } i <- i + 1; }
+  return false;
+};
+val Global <- fn(mod, form, id) {
+  Need(Head(form, "define"), "only top-level define/import/export supported in module " + mod:name);
+  val a <- form:items; Need(G:Len(a) >= 3, "define lacks a value or body");
+  if a[1]:tag == "list" {
+    val signature <- a[1]:items;
+    Need(G:Len(signature) >= 1 and signature[0]:tag == "sym", "invalid function signature");
+    var params <- []; var i <- 1;
+    while i < G:Len(signature) {
+      Need(signature[i]:tag == "sym", "parameter must be symbol");
+      Need(not Has(params, signature[i]:value), "duplicate function parameter");
+      params <- params + [signature[i]:value]; i <- i + 1;
+    }
+    var body <- []; i <- 2;
+    while i < G:Len(a) { body <- body + [a[i]]; i <- i + 1; }
+    return {module: mod:name, name: signature[0]:value, kind: "function", id: id, params: params, body: body, init: {tag: "nil"}};
+  }
+  Need(a[1]:tag == "sym" and G:Len(a) == 3, "global variable define requires one expression");
+  return {module: mod:name, name: a[1]:value, kind: "variable", id: id, params: [], body: [], init: a[2]};
+};
+val LookupModule <- fn(modules, name) {
+  var i <- 0;
+  while i < G:Len(modules) { if modules[i]:name == name { return modules[i]; } i <- i + 1; }
+  return nil;
+};
+val FindLocal <- fn(globals, moduleName, name) {
+  var i <- 0;
+  while i < G:Len(globals) {
+    val item <- globals[i];
+    if item:module == moduleName and item:name == name { return item; }
+    i <- i + 1;
+  }
+  return nil;
+};
+val Resolve <- fn(program, current, symbol) {
+  val direct <- FindLocal(program:globals, current, symbol);
+  if direct != nil { return direct; }
+  val m <- LookupModule(program:modules, current);
+  Need(m != nil, "unknown source module " + current);
+  var found <- nil; var i <- 0;
+  while i < G:Len(m:imports) {
+    val importName <- m:imports[i];
+    val imported <- LookupModule(program:modules, importName);
+    if imported != nil and Has(imported:exports, symbol) {
+      val candidate <- FindLocal(program:globals, importName, symbol);
+      if candidate != nil {
+        Need(found == nil, "ambiguous imported symbol " + symbol + " in " + current);
+        found <- candidate;
+      }
+    }
+    i <- i + 1;
+  }
+  return found;
+};
+val Analyze <- fn(files) {
+  var modules <- []; var i <- 0;
+  while i < G:Len(files) {
+    val m <- ParseModule(files[i]:path, files[i]:source);
+    Need(LookupModule(modules, m:name) == nil, "duplicate module " + m:name);
+    modules <- modules + [m]; i <- i + 1;
+  }
+  # Stable topological order: dependency initializers run before consumers.
+  var ordered <- []; var done <- [];
+  while G:Len(ordered) < G:Len(modules) {
+    var changed <- false; var idx <- 0;
+    while idx < G:Len(modules) {
+      val candidate <- modules[idx];
+      if not Has(done, candidate:name) {
+        var ready <- true; var k <- 0;
+        while k < G:Len(candidate:imports) {
+          val imported <- candidate:imports[k];
+          if imported != "tp.base" and imported != "tp.io" and not Has(done, imported) {
+            ready <- false;
+          }
+          k <- k + 1;
+        }
+        if ready {
+          ordered <- ordered + [candidate]; done <- done + [candidate:name]; changed <- true;
+        }
+      }
+      idx <- idx + 1;
+    }
+    Need(changed, "cyclic or missing module imports; cyclic initialization is not yet supported");
+  }
+  modules <- ordered;
+  var globals <- []; var nextid <- 1; i <- 0;
+  while i < G:Len(modules) {
+    val m <- modules[i]; var j <- 0;
+    while j < G:Len(m:forms) {
+      val g <- Global(m, m:forms[j], nextid);
+      Need(FindLocal(globals, m:name, g:name) == nil, "duplicate binding " + m:name + "::" + g:name);
+      globals <- globals + [g]; nextid <- nextid + 1; j <- j + 1;
+    }
+    i <- i + 1;
+  }
+  i <- 0;
+  while i < G:Len(modules) {
+    val m <- modules[i]; var j <- 0;
+    while j < G:Len(m:imports) {
+      val imp <- m:imports[j];
+      if imp != "tp.base" and imp != "tp.io" {
+        Need(LookupModule(modules, imp) != nil, "missing imported module " + imp);
+      }
+      j <- j + 1;
+    }
+    j <- 0;
+    while j < G:Len(m:exports) {
+      Need(FindLocal(globals, m:name, m:exports[j]) != nil, "undefined export " + m:exports[j]);
+      j <- j + 1;
+    }
+    i <- i + 1;
+  }
+  return {modules: modules, globals: globals};
+};
+return {Analyze: Analyze, Resolve: Resolve, FindLocal: FindLocal, LookupModule: LookupModule, Has: Has};

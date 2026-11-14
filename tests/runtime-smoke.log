@@ -1,0 +1,16 @@
+This is TeX, Version 3.141592653 (TeX Live 2024) (preloaded format=tex 2024.10.26)  14 NOV 2026 06:12
+**runtime-smoke.tex
+(./runtime-smoke.tex (../runtime/tex82.tex
+TP@frame=count26
+TP@result=count27
+TP@tag=count28
+TP@aux=count29
+TP@truthvalue=count30
+)
+TEXPRESSO-SMOKE:49
+TEXPRESSO-ZERO-IS-TRUE:1
+TEXPRESSO-FALSE-IS-FALSE:0
+#f
+A%B{C}D
+ )
+No pages of output.

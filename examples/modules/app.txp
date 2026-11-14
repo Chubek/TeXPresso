@@ -1,0 +1,6 @@
+(module (sample app)
+  (import (sample math) (tp io))
+  (export main)
+  (define (main)
+    (println (cube 3))
+    (println (square 4))))

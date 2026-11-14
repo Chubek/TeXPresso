@@ -1,0 +1,17 @@
+.dub
+docs.json
+__dummy.html
+docs/
+/texpresso
+texpresso.so
+texpresso.dylib
+texpresso.dll
+libtexpresso.a
+texpresso.a
+texpresso.lib
+texpresso-test-*
+*.exe
+*.pdb
+*.o
+*.obj
+*.lst

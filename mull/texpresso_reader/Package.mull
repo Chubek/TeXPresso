@@ -1,0 +1,46 @@
+# S-expression reader. Quote is desugared into (quote value).
+val Err <- fn(t, msg) { G:DieWith("TeXPresso reader: " + msg + " at " + G:Str(t:line) + ":" + G:Str(t:column)); };
+val Symbol <- fn(s) { return {tag: "sym", value: s}; };
+val ReadOne <- fn(tokens, pos) {
+  if pos >= G:Len(tokens) { G:DieWith("TeXPresso reader: unexpected end of file"); }
+  val t <- tokens[pos];
+  if t:kind == "left" {
+    var i <- pos + 1; var xs <- [];
+    while i < G:Len(tokens) and tokens[i]:kind != "right" {
+      val r <- ReadOne(tokens, i);
+      xs <- xs + [r:node]; i <- r:next;
+    }
+    if i >= G:Len(tokens) { Err(t, "unclosed list"); }
+    return {node: {tag: "list", items: xs, line: t:line}, next: i + 1};
+  }
+  if t:kind == "right" { Err(t, "unexpected closing parenthesis"); }
+  if t:kind == "quote" {
+    val r <- ReadOne(tokens, pos + 1);
+    return {node: {tag: "list", items: [Symbol("quote"), r:node], line: t:line}, next: r:next};
+  }
+  if t:kind == "string" { return {node: {tag: "str", value: t:text, line: t:line}, next: pos + 1}; }
+  if t:kind == "boolean" { return {node: {tag: "bool", value: t:text == "#t", line: t:line}, next: pos + 1}; }
+  if t:kind == "integer" {
+    var i <- 0; var sign <- 1;
+    if t:text[0] == "-" { sign <- 0 - 1; i <- 1; }
+    if t:text[0] == "+" { i <- 1; }
+    var n <- 0;
+    while i < G:Len(t:text) {
+      val digit <- t:text[i];
+      val alphabet <- "0123456789"; var j <- 0;
+      while j < 10 and alphabet[j] != digit { j <- j + 1; }
+      n <- n * 10 + j; i <- i + 1;
+    }
+    return {node: {tag: "int", value: sign * n, line: t:line}, next: pos + 1};
+  }
+  return {node: {tag: "sym", value: t:text, line: t:line}, next: pos + 1};
+};
+val ReadAll <- fn(tokens) {
+  var result <- []; var i <- 0;
+  while i < G:Len(tokens) {
+    val r <- ReadOne(tokens, i);
+    result <- result + [r:node]; i <- r:next;
+  }
+  return result;
+};
+return {ReadAll: ReadAll, ReadOne: ReadOne, Symbol: Symbol};

@@ -1,0 +1,333 @@
+# TeXPresso Scheme -> TeX82 code generator. All compilation logic is MuLL.
+# Target: numeric first-order Scheme subset; integers and booleans use TeX counts.
+val Ana <- G:LoadLib("texpresso_analyzer") or G:DieWith("TeXPresso codegen: analyzer unavailable: $E?");
+val Need <- fn(ok, message) { if not ok { G:DieWith("TeXPresso codegen: " + message); } return nil; };
+val Is <- fn(n, name) { return n:tag == "sym" and n:value == name; };
+val Head <- fn(n, name) { return n:tag == "list" and G:Len(n:items) > 0 and Is(n:items[0], name); };
+val N <- fn(n) { return G:Str(n); };
+# TeX scans letters only in control-sequence words. Encode IDs as [a-z]+.
+# NEVER concatenate numeric IDs after a backslash control word.
+val Alpha <- fn(id) {
+  val alphabet <- "abcdefghijklmnopqrstuvwxyz";
+  var n <- id; var result <- "";
+  while n > 0 {
+    val digit <- (n - 1) % 26;
+    result <- alphabet[digit] + result;
+    n <- (n - 1 - digit) / 26;
+  }
+  return result;
+};
+val Local <- fn(locals, name) {
+  var i <- G:Len(locals);
+  while i > 0 {
+    i <- i - 1;
+    if locals[i]:name == name { return locals[i]; }
+  }
+  return nil;
+};
+val Known <- fn(name) {
+  return name == "+" or name == "-" or name == "*" or name == "/" or name == "modulo" or name == "remainder" or name == "=" or name == "<" or name == ">" or name == "<=" or name == ">=" or name == "not" or name == "zero?" or name == "println" or name == "display" or name == "newline";
+};
+val Resolve <- fn(p, mod, name) { return Ana:Resolve(p, mod, name); };
+val Result <- fn(code, state) { return {code: code, state: state}; };
+val State <- fn(slot, loop) { return {slot: slot, loop: loop}; };
+val Load <- fn(i) { return "\\TP@load{" + N(i) + "}"; };
+val Store <- fn(i) { return "\\TP@store{" + N(i) + "}{\\TP@result}%\n"; };
+val TexString <- fn(s) {
+  # Emit only expandable tokens; with escapechar=-1, \string\% prints literal '%'.
+  var out <- ""; var i <- 0;
+  while i < G:Len(s) {
+    val c <- s[i];
+    if c == "{" { out <- out + "\\string\\{"; }
+    else if c == "}" { out <- out + "\\string\\}"; }
+    else if c == "#" { out <- out + "\\string\\#"; }
+    else if c == "$" { out <- out + "\\string\\$"; }
+    else if c == "%" { out <- out + "\\string\\%"; }
+    else if c == "&" { out <- out + "\\string\\&"; }
+    else if c == "_" { out <- out + "\\string\\_"; }
+    else if c == "^" { out <- out + "\\string\\^"; }
+    else if c == "~" { out <- out + "\\string\\~"; }
+    else if c == "\\" { out <- out + "\\string\\\\"; }
+    else if c == "\n" { G:DieWith("TeXPresso: embedded newlines in printed string literals are not supported; call println separately"); }
+    else if c == "\r" { out <- out + ""; }
+    # A control-word delimiter is swallowed by TeX's mouth; the expanded
+    # space itself is preserved, unlike literal spaces or braces in a write.
+    else if c == " " or c == "\t" { out <- out + "\\space "; }
+    else { out <- out + c; }
+    i <- i + 1;
+  }
+  return out;
+};
+# Compile takes an explicitly threaded allocator state, avoiding hidden global state.
+val Compile <- fn(n, locals, state, p, mod) {
+  if n:tag == "int" { return Result("\\global\\TP@result=" + N(n:value) + "\\relax\\global\\TP@tag=1\\relax%\n", state); }
+  if n:tag == "bool" {
+    if n:value { return Result("\\global\\TP@result=1\\relax\\global\\TP@tag=2\\relax%\n", state); }
+    return Result("\\global\\TP@result=0\\relax\\global\\TP@tag=2\\relax%\n", state);
+  }
+  if n:tag == "sym" {
+    val loc <- Local(locals, n:value);
+    if loc != nil { return Result("\\global\\TP@result=" + Load(loc:slot) + "\\relax\\global\\TP@tag=\\TP@loadtag{" + N(loc:slot) + "}\\relax%\n", state); }
+    val glob <- Resolve(p, mod, n:value);
+    Need(glob != nil, "unbound identifier " + mod + "::" + n:value);
+    Need(glob:kind == "variable", "procedure used as a numeric value: " + n:value);
+    return Result("\\global\\TP@result=\\TP@gload{" + N(glob:id) + "}\\relax\\global\\TP@tag=\\TP@gtagload{" + N(glob:id) + "}\\relax%\n", state);
+  }
+  Need(n:tag == "list", "unsupported expression type " + n:tag);
+  val xs <- n:items; Need(G:Len(xs) > 0, "empty list is not a numeric expression");
+  Need(xs[0]:tag == "sym", "first-class function invocation is not implemented in this backend");
+  val op <- xs[0]:value;
+  if op == "quote" { G:DieWith("TeXPresso: quoted data needs the not-yet-implemented heap backend"); }
+  if op == "lambda" { G:DieWith("TeXPresso: escaping lambdas need closure conversion and the TPAM backend"); }
+  if op == "begin" {
+    var code <- ""; var s <- state; var i <- 1;
+    while i < G:Len(xs) {
+      val r <- Compile(xs[i], locals, s, p, mod);
+      code <- code + r:code; s <- r:state; i <- i + 1;
+    }
+    return Result(code, s);
+  }
+  if op == "if" {
+    Need(G:Len(xs) == 4, "if requires test, then, else");
+    val cond <- Compile(xs[1], locals, state, p, mod);
+    val yes <- Compile(xs[2], locals, cond:state, p, mod);
+    val no <- Compile(xs[3], locals, yes:state, p, mod);
+    return Result(cond:code + "\\TP@settruth%\n\\ifnum\\TP@truthvalue=0\\relax%\n" + no:code + "\\else%\n" + yes:code + "\\fi%\n", no:state);
+  }
+  if op == "cond" {
+    var acc <- {tag: "int", value: 0};
+    var i <- G:Len(xs) - 1;
+    while i >= 1 {
+      val clause <- xs[i];
+      Need(clause:tag == "list" and G:Len(clause:items) >= 2, "cond clause must have a test and body");
+      var forms <- [{tag: "sym", value: "begin"}];
+      var j <- 1;
+      while j < G:Len(clause:items) { forms <- forms + [clause:items[j]]; j <- j + 1; }
+      val body <- {tag: "list", items: forms};
+      if Is(clause:items[0], "else") {
+        Need(i == G:Len(xs) - 1, "cond else must be the last clause");
+        acc <- body;
+      } else {
+        acc <- {tag: "list", items: [{tag: "sym", value: "if"}, clause:items[0], body, acc]};
+      }
+      i <- i - 1;
+    }
+    return Compile(acc, locals, state, p, mod);
+  }
+  if op == "while" {
+    Need(G:Len(xs) >= 2, "while requires condition");
+    val id <- state:loop; val initial <- State(state:slot, id + 1);
+    val condition <- Compile(xs[1], locals, initial, p, mod);
+    var body <- ""; var s <- condition:state; var j <- 2;
+    while j < G:Len(xs) {
+      val r <- Compile(xs[j], locals, s, p, mod);
+      body <- body + r:code; s <- r:state; j <- j + 1;
+    }
+    val name <- "\\TP@loop@" + Alpha(id);
+    val code <- "\\def" + name + "{%\n" + condition:code + "\\TP@settruth%\n";
+    val tail <- "\\ifnum\\TP@truthvalue=0\\relax\\let\\TP@jump\\relax\\else%\n" + body + "\\let\\TP@jump" + name + "\\fi%\n\\TP@jump%\n}%\n" + name + "%\n";
+    return Result(code + tail, s);
+  }
+  if op == "when" or op == "unless" {
+    Need(G:Len(xs) >= 2, "when/unless requires test");
+    val cond <- Compile(xs[1], locals, state, p, mod);
+    var s <- cond:state; var code <- ""; var i <- 2;
+    while i < G:Len(xs) {
+      val r <- Compile(xs[i], locals, s, p, mod);
+      code <- code + r:code; s <- r:state; i <- i + 1;
+    }
+    var flag <- "=0";
+    if op == "unless" { flag <- ">0"; }
+    return Result(cond:code + "\\TP@settruth%\n\\ifnum\\TP@truthvalue" + flag + "\\relax%\n\\else%\n" + code + "\\fi%\n", s);
+  }
+  if op == "set!" {
+    Need(G:Len(xs) == 3 and xs[1]:tag == "sym", "set! requires identifier and expression");
+    val r <- Compile(xs[2], locals, state, p, mod);
+    val local <- Local(locals, xs[1]:value);
+    if local != nil { return Result(r:code + Store(local:slot), r:state); }
+    val glob <- Resolve(p, mod, xs[1]:value);
+    Need(glob != nil and glob:kind == "variable", "set! requires a mutable global variable");
+    return Result(r:code + "\\TP@gstore{" + N(glob:id) + "}{\\TP@result}%\n", r:state);
+  }
+  if op == "let" or op == "let*" {
+    Need(G:Len(xs) >= 3 and xs[1]:tag == "list", "let requires a list of bindings and a body");
+    var scope <- locals; var s <- state; var code <- "";
+    var i <- 0; val bindings <- xs[1]:items; var names <- [];
+    while i < G:Len(bindings) {
+      val pair <- bindings[i];
+      Need(pair:tag == "list" and G:Len(pair:items) == 2 and pair:items[0]:tag == "sym", "invalid let binding");
+      val nm <- pair:items[0]:value;
+      Need(op == "let*" or not Ana:Has(names, nm), "duplicate let binding: " + nm);
+      names <- names + [nm];
+      var lookup <- locals;
+      if op == "let*" { lookup <- scope; }
+      val value <- Compile(pair:items[1], lookup, s, p, mod);
+      val slot <- value:state:slot;
+      s <- State(slot + 1, value:state:loop);
+      code <- code + value:code + Store(slot);
+      scope <- scope + [{name: nm, slot: slot}];
+      i <- i + 1;
+    }
+    i <- 2;
+    while i < G:Len(xs) {
+      val value <- Compile(xs[i], scope, s, p, mod);
+      code <- code + value:code; s <- value:state; i <- i + 1;
+    }
+    return Result(code, s);
+  }
+  if op == "and" or op == "or" {
+    var s <- state; var code <- ""; var i <- 1;
+    if op == "and" { code <- "\\global\\TP@result=1\\relax\\global\\TP@tag=2\\relax%\n"; }
+    else { code <- "\\global\\TP@result=0\\relax\\global\\TP@tag=2\\relax%\n"; }
+    while i < G:Len(xs) {
+      var a <- Compile(xs[i], locals, s, p, mod);
+      var guard <- "=0";
+      if op == "or" { guard <- ">0"; }
+      code <- code + "\\TP@settruth%\n\\ifnum\\TP@truthvalue" + guard + "\\relax%\n\\else%\n" + a:code + "\\fi%\n";
+      s <- a:state; i <- i + 1;
+    }
+    return Result(code, s);
+  }
+  # Syntax is handled above; procedure names obey lexical/module lookup
+  # before falling back to the backend's primitive procedures.
+  Need(Local(locals, op) == nil, "attempt to call a local variable: " + op + "; first-class procedure calls are not implemented");
+  val fninfo <- Resolve(p, mod, op);
+  if fninfo != nil {
+    Need(fninfo:kind == "function", "attempt to call a variable: " + op);
+    val argc <- G:Len(xs) - 1;
+    Need(argc == G:Len(fninfo:params), "wrong procedure arity: " + op);
+    # Reserve the whole argument area before compiling nested applications.
+    val base <- state:slot;
+    var s <- State(base + argc, state:loop); var code <- ""; var i <- 0;
+    while i < argc {
+      val r <- Compile(xs[i + 1], locals, s, p, mod);
+      code <- code + r:code + Store(base + i);
+      s <- r:state; i <- i + 1;
+    }
+    return Result(code + "\\TP@fn@" + Alpha(fninfo:id) + "{" + N(base) + "}%\n", s);
+  }
+  if op == "println" or op == "display" {
+    Need(G:Len(xs) == 2, op + " accepts exactly one argument");
+    var text <- "";
+    if xs[1]:tag == "str" { text <- TexString(xs[1]:value); }
+    else {
+      val value <- Compile(xs[1], locals, state, p, mod);
+      var suffix <- "\\TP@println%\n";
+      if op == "display" { suffix <- "\\TP@display%\n"; }
+      return Result(value:code + suffix, value:state);
+    }
+    if op == "display" { return Result("\\message{" + text + "}%\n", state); }
+    return Result("\\immediate\\write16{" + text + "}%\n", state);
+  }
+  if op == "newline" {
+    Need(G:Len(xs) == 1, "newline has no arguments");
+    return Result("\\immediate\\write16{}%\n", state);
+  }
+  if op == "not" or op == "zero?" {
+    Need(G:Len(xs) == 2, op + " accepts one argument");
+    val arg <- Compile(xs[1], locals, state, p, mod);
+    var logic <- "\\TP@settruth%\n";
+    if op == "zero?" { logic <- "\\ifnum\\TP@tag=1\\relax\\else\\errmessage{TeXPresso: zero? expects integer}\\fi%\n"; }
+    logic <- logic + "\\ifnum\\TP@result=0\\relax\\global\\TP@result=1\\relax\\else\\global\\TP@result=0\\relax\\fi\\global\\TP@tag=2\\relax%\n";
+    if op == "not" { logic <- "\\TP@settruth%\n\\ifnum\\TP@truthvalue=0\\relax\\global\\TP@result=1\\relax\\else\\global\\TP@result=0\\relax\\fi\\global\\TP@tag=2\\relax%\n"; }
+    return Result(arg:code + logic, arg:state);
+  }
+  val numeric <- op == "+" or op == "-" or op == "*" or op == "/" or op == "modulo" or op == "remainder" or op == "=" or op == "<" or op == ">" or op == "<=" or op == ">=";
+  if numeric {
+    val argc <- G:Len(xs) - 1;
+    Need(argc <= 2, "numeric operations currently support at most two arguments");
+    Need(argc > 0 or op == "+" or op == "*", "operator " + op + " requires arguments");
+    if argc == 0 {
+      if op == "+" { return Result("\\global\\TP@result=0\\relax\\global\\TP@tag=1\\relax%\n", state); }
+      return Result("\\global\\TP@result=1\\relax\\global\\TP@tag=1\\relax%\n", state);
+    }
+    val base <- state:slot;
+    var s <- State(base + argc, state:loop); var code <- ""; var i <- 0;
+    while i < argc {
+      val r <- Compile(xs[i + 1], locals, s, p, mod);
+      code <- code + r:code + Store(base + i);
+      s <- r:state; i <- i + 1;
+    }
+    code <- code + "\\TP@requireint{" + N(base) + "}%\n";
+    if argc == 2 { code <- code + "\\TP@requireint{" + N(base + 1) + "}%\n"; }
+    code <- code + "\\global\\TP@result=" + Load(base) + "\\relax\\global\\TP@tag=1\\relax%\n";
+    if argc == 1 {
+      if op == "-" { code <- code + "\\global\\multiply\\TP@result by-1\\relax%\n"; }
+      else { Need(op == "+" or op == "*", "unary operator not supported: " + op); }
+      return Result(code, s);
+    }
+    val rhs <- Load(base + 1);
+    if op == "+" { code <- code + "\\global\\advance\\TP@result by" + rhs + "\\relax%\n"; }
+    else if op == "-" { code <- code + "\\TP@aux=" + rhs + "\\relax\\multiply\\TP@aux by-1\\relax\\global\\advance\\TP@result by\\TP@aux\\relax%\n"; }
+    else if op == "*" { code <- code + "\\global\\multiply\\TP@result by" + rhs + "\\relax%\n"; }
+    else if op == "/" { code <- code + "\\TP@checkdivisor{" + N(base + 1) + "}%\n\\global\\divide\\TP@result by" + rhs + "\\relax%\n"; }
+    else if op == "remainder" or op == "modulo" {
+      code <- code + "\\TP@checkdivisor{" + N(base + 1) + "}%\n";
+      code <- code + "\\TP@aux=" + Load(base) + "\\relax\\divide\\TP@aux by" + rhs + "\\relax\\multiply\\TP@aux by" + rhs + "\\relax\\global\\TP@result=" + Load(base) + "\\relax\\multiply\\TP@aux by-1\\relax\\global\\advance\\TP@result by\\TP@aux\\relax%\n";
+      if op == "modulo" {
+        code <- code + "\\ifnum\\TP@result=0\\relax\\else%\n";
+        code <- code + "\\ifnum\\TP@result<0\\relax%\n";
+        code <- code + "\\ifnum" + rhs + ">0\\relax\\global\\advance\\TP@result by" + rhs + "\\relax\\fi%\n";
+        code <- code + "\\else%\n";
+        code <- code + "\\ifnum" + rhs + "<0\\relax\\global\\advance\\TP@result by" + rhs + "\\relax\\fi%\n";
+        code <- code + "\\fi\\fi%\n";
+      }
+    } else {
+      var relation <- "=";
+      if op == "<" { relation <- "<"; }
+      if op == ">" { relation <- ">"; }
+      if op == "<=" { relation <- ">"; }
+      if op == ">=" { relation <- "<"; }
+      code <- code + "\\ifnum" + Load(base) + relation + rhs + "\\relax\\global\\TP@result=1\\relax\\else\\global\\TP@result=0\\relax\\fi\\global\\TP@tag=2\\relax%\n";
+      if op == "<=" or op == ">=" { code <- code + "\\ifnum\\TP@result=0\\relax\\global\\TP@result=1\\relax\\else\\global\\TP@result=0\\relax\\fi%\n"; }
+    }
+    return Result(code, s);
+  }
+  G:DieWith("TeXPresso codegen: unresolved procedure: " + mod + "::" + op);
+};
+val Emit <- fn(p, entry) {
+  var main <- nil; var k <- 0;
+  while k < G:Len(p:modules) {
+    val m <- p:modules[k];
+    if Ana:Has(m:exports, entry) {
+      val x <- Ana:FindLocal(p:globals, m:name, entry);
+      if x != nil and x:kind == "function" and G:Len(x:params) == 0 {
+        Need(main == nil, "multiple exported zero-argument entries named " + entry);
+        main <- x;
+      }
+    }
+    k <- k + 1;
+  }
+  Need(main != nil, "missing exported zero-argument entry procedure " + entry);
+  var out <- "% Generated by TeXPresso (MuLL compiler) -- plain TeX only\n";
+  out <- out + "% TeX82 integer subset: no LaTeX, fonts, pages or shipout.\n";
+  var globalsCode <- ""; var i <- 0;
+  while i < G:Len(p:globals) {
+    val g <- p:globals[i];
+    if g:kind == "function" {
+      var locals <- []; var j <- 0; var prologue <- "";
+      while j < G:Len(g:params) {
+        val slot <- j + 1;
+        locals <- locals + [{name: g:params[j], slot: slot}];
+        # Each argument carries its own tag; TP@tag still describes the last
+        # evaluated argument and must not be reused for every parameter.
+        prologue <- prologue + "\\TP@aux=#1\\relax%\n\\advance\\TP@aux by" + N(j) + "\\relax%\n\\TP@copycaller{" + N(slot) + "}{\\the\\TP@aux}%\n";
+        j <- j + 1;
+      }
+      var state <- State(G:Len(g:params) + 1, g:id * 100000); var code <- ""; j <- 0;
+      while j < G:Len(g:body) {
+        val r <- Compile(g:body[j], locals, state, p, g:module);
+        code <- code + r:code; state <- r:state; j <- j + 1;
+      }
+      out <- out + "\\def\\TP@fn@" + Alpha(g:id) + "#1{%\n\\TP@enter%\n" + prologue + code + "\\TP@leave%\n}%\n";
+    } else {
+      val r <- Compile(g:init, [], State(1, g:id * 100000), p, g:module);
+      globalsCode <- globalsCode + r:code + "\\TP@gstore{" + N(g:id) + "}{\\TP@result}%\n";
+    }
+    i <- i + 1;
+  }
+  out <- out + "% Initialize module globals and invoke the exported entry.\n";
+  out <- out + globalsCode + "\\TP@fn@" + Alpha(main:id) + "{0}%\n\\end\n";
+  return out;
+};
+return {Emit: Emit, Compile: Compile};

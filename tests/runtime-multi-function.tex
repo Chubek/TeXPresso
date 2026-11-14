@@ -1,0 +1,23 @@
+\input ../runtime/tex82.tex
+% Independent ABI test of two letter-suffixed procedure names (TeX control words).
+\def\TP@fn@a#1{%
+  \TP@enter
+  \TP@aux=#1\relax
+  \TP@copycaller{1}{\the\TP@aux}
+  \global\TP@result=\TP@load{1}\relax
+  \global\multiply\TP@result by\TP@load{1}\relax
+  \global\TP@tag=1\relax
+  \TP@leave
+}
+\def\TP@fn@b#1{%
+  \TP@enter
+  \immediate\write16{Hello from TeXPresso!}
+  \global\TP@result=12\relax
+  \global\TP@tag=1\relax
+  \TP@store{1}{\TP@result}
+  \TP@fn@a{1}
+  \TP@println
+  \TP@leave
+}
+\TP@fn@b{0}
+\end
